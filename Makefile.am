@@ -411,6 +411,21 @@ rdp_backend_la_SOURCES = 			\
 	shared/helpers.h
 endif
 
+if ENABLE_FIRERDS_COMPOSITOR
+module_LTLIBRARIES += firerds-backend.la
+firerds_backend_la_LDFLAGS = -module -avoid-version
+firerds_backend_la_LIBADD = $(COMPOSITOR_LIBS) \
+	$(FIRERDS_COMPOSITOR_LIBS) -lfreerdp-server \
+	libshared.la
+firerds_backend_la_CFLAGS =				\
+	$(COMPOSITOR_CFLAGS)			\
+	$(FIRERDS_COMPOSITOR_CFLAGS)		\
+	$(AM_CFLAGS)
+firerds_backend_la_SOURCES = 			\
+	src/compositor-firerds.c			\
+	shared/helpers.h
+endif
+
 if HAVE_LCMS
 module_LTLIBRARIES += cms-static.la
 cms_static_la_LDFLAGS = -module -avoid-version
