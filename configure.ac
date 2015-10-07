@@ -245,6 +245,16 @@ if test x$enable_rdp_compositor = xyes; then
   CPPFLAGS="$SAVED_CPPFLAGS"
 fi
 
+AC_ARG_ENABLE([firerds-compositor], [  --enable-firerds-compositor],,
+              enable_firerds_compositor=no)
+AM_CONDITIONAL([ENABLE_FIRERDS_COMPOSITOR],
+               [test x$enable_firerds_compositor = xyes])
+if test x$enable_firerds_compositor = xyes; then
+  AC_DEFINE([BUILD_FIRERDS_COMPOSITOR], [1], [Build the firerds compositor])
+  PKG_CHECK_MODULES(FIRERDS_COMPOSITOR, [firerds-backend freerdp2 >= 2.0])
+fi
+
+
 AC_ARG_ENABLE([screen-sharing], [  --enable-screen-sharing],,
               enable_screen_sharing=no)
 AM_CONDITIONAL([ENABLE_SCREEN_SHARING],
@@ -672,6 +682,7 @@ AC_MSG_RESULT([
 	RPI Compositor			${enable_rpi_compositor}
 	FBDEV Compositor		${enable_fbdev_compositor}
 	RDP Compositor			${enable_rdp_compositor}
+	firerds Compositor		${enable_firerds_compositor}
 	Screen Sharing			${enable_screen_sharing}
 	JUnit XML output		${enable_junit_xml}
 
