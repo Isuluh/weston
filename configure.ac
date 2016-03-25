@@ -257,7 +257,7 @@ AM_CONDITIONAL([ENABLE_FIRERDS_COMPOSITOR],
                [test x$enable_firerds_compositor = xyes])
 if test x$enable_firerds_compositor = xyes; then
   AC_DEFINE([BUILD_FIRERDS_COMPOSITOR], [1], [Build the firerds compositor])
-  PKG_CHECK_MODULES(FIRERDS_COMPOSITOR, [firerds-backend freerdp2 >= 2.0])
+  PKG_CHECK_MODULES(FIRERDS_COMPOSITOR, [firerds-backend0 freerdp2 >= 2.0])
 fi
 
 
