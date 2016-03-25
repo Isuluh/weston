@@ -677,37 +677,6 @@ firerds_scancode_keyboard_event(struct firerds_backend *c, struct weston_seat *s
 	}
 }
 
-static void
-firerds_virtual_keyboard_event(struct firerds_backend *c, struct weston_seat *seat,
-		UINT32 flags, UINT32 vk_code)
-{
-	uint32_t key_code;
-	enum wl_keyboard_key_state keyState;
-	int notify = 0;
-
-	//weston_log("vk_code=%d flags=0x%x\n", vk_code, flags);
-	if (flags & KBD_FLAGS_DOWN) {
-		keyState = WL_KEYBOARD_KEY_STATE_PRESSED;
-		notify = 1;
-	} else if (flags & KBD_FLAGS_RELEASE) {
-		keyState = WL_KEYBOARD_KEY_STATE_RELEASED;
-		notify = 1;
-	}
-
-	if(notify) {
-		if(flags & KBD_FLAGS_EXTENDED)
-			vk_code |= KBDEXT;
-
-		key_code = GetKeycodeFromVirtualKeyCode(vk_code, KEYCODE_TYPE_EVDEV);
-
-		/*weston_log("code=%x ext=%d vk_code=%x scan_code=%x\n", code, (flags & KBD_FLAGS_EXTENDED) ? 1 : 0,
-				vk_code, scan_code);*/
-		notify_key(seat, weston_compositor_get_time(), key_code, keyState,
-				STATE_UPDATE_AUTOMATIC);
-	}
-}
-
-
 struct rdp_to_xkb_keyboard_layout {
 	UINT32 rdpLayoutCode;
 	const char *xkbLayout;
@@ -1057,7 +1026,6 @@ firerds_treat_message(struct firerds_backend *b, UINT16 type, firerds_message *m
 	firerds_msg_mouse_event *mouse_event;
 	firerds_msg_framebuffer_sync_request *sync_req;
 	firerds_msg_scancode_keyboard_event *scancode_event;
-	firerds_msg_virtual_keyboard_event *vk_event;
 	firerds_msg_synchronize_keyboard_event *sync_keyboard_event;
 	firerds_msg_seat_new *seatNew;
 	firerds_msg_seat_removed *seatRemoved;
@@ -1135,14 +1103,6 @@ firerds_treat_message(struct firerds_backend *b, UINT16 type, firerds_message *m
 			return 0;
 		firerds_scancode_keyboard_event(b, seat, scancode_event->flags, scancode_event->code,
 				scancode_event->keyboardType);
-		break;
-
-	case FIRERDS_CLIENT_VIRTUAL_KEYBOARD_EVENT:
-		vk_event = &message->virtualKeyboard;
-		seat = retrieve_seat(b, vk_event->connectionId);
-		if (!seat)
-			return 0;
-		firerds_virtual_keyboard_event(b, seat, vk_event->flags, vk_event->code);
 		break;
 
 	case FIRERDS_CLIENT_FRAMEBUFFER_SYNC_REQUEST:
