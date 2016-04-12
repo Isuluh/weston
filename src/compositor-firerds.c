@@ -337,7 +337,6 @@ firerds_kill_client(struct firerds_backend *c) {
 		seat->keyboard_type = 0;
 		weston_seat_release_pointer(&seat->base);
 		weston_seat_release_keyboard(&seat->base);
-		weston_seat_release(&seat->base);
 	}
 
 	c->seat = NULL;
@@ -1041,12 +1040,15 @@ firerds_treat_message(struct firerds_backend *b, UINT16 type, firerds_message *m
 	switch (type) {
 	case FIRERDS_CLIENT_CAPABILITIES:
 		capabilities = &message->capabilities;
-		b->seat = firerdsSeat = zalloc(sizeof(*firerdsSeat));
-		if (!firerdsSeat) {
-			weston_log("unable to allocate the seat");
-			return 0;
+		if (!b->seat) {
+			b->seat = zalloc(sizeof(*firerdsSeat));
+			if (!b->seat) {
+				weston_log("unable to allocate the seat");
+				return 0;
+			}
 		}
 
+		firerdsSeat = b->seat;
 		weston_seat_init(&firerdsSeat->base, b->compositor, "firerds");
 		weston_seat_init_pointer(&firerdsSeat->base);
 		b->mainSeatConnectionId = capabilities->connectionId;
