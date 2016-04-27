@@ -55,8 +55,10 @@
 #include "compositor-fbdev.h"
 #include "compositor-x11.h"
 #include "compositor-wayland.h"
+#include "compositor-firerds.h"
 
 #define WINDOW_TITLE "Weston Compositor"
+
 
 static struct wl_list child_process_list;
 static struct weston_compositor *segv_compositor;
@@ -348,6 +350,15 @@ usage(int error_code)
 		"  --use-pixman\t\tUse the pixman (CPU) renderer\n"
 		"  --output-count=COUNT\tCreate multiple outputs\n"
 		"  --no-input\t\tDont create input devices\n\n");
+#endif
+
+#if defined(BUILD_FIRERDS_COMPOSITOR)
+	fprintf(stderr,
+		"Options for firerds-backend.so:\n\n"
+		"  --width=WIDTH\t\tWidth of X window\n"
+		"  --height=HEIGHT\tHeight of X window\n"
+		"  --firerds-named-pipe=name\t\tNamed pipe that fireRDS will connnect on\n"
+		"\n");
 #endif
 
 	exit(error_code);
@@ -856,6 +867,40 @@ load_rdp_backend(struct weston_compositor *c, char const * backend,
 	return ret;
 }
 
+static void
+weston_firerds_backend_config_init(struct weston_firerds_backend_config *config)
+{
+	config->base.struct_version = WESTON_FIRERDS_BACKEND_CONFIG_VERSION;
+	config->base.struct_size = sizeof(struct weston_firerds_backend_config);
+
+	config->width = 640;
+	config->height = 480;
+	config->named_pipe = NULL;
+}
+
+static int
+load_firerds_backend(struct weston_compositor *c, char const * backend,
+		int *argc, char *argv[], struct weston_config *wc)
+{
+	struct weston_firerds_backend_config config  = {{ 0, }};
+	int ret = 0;
+
+	weston_firerds_backend_config_init(&config);
+
+	const struct weston_option firerds_options[] = {
+			{ WESTON_OPTION_STRING, "firerds-pipe", 0, &config.named_pipe },
+			{ WESTON_OPTION_UNSIGNED_INTEGER, "width", 0, &config.width },
+			{ WESTON_OPTION_UNSIGNED_INTEGER, "height", 0, &config.height },
+		};
+
+	parse_options(firerds_options, ARRAY_LENGTH(firerds_options), argc, argv);
+
+	ret = load_backend_new(c, backend, &config.base);
+
+	free(config.named_pipe);
+	return ret;
+}
+
 static int
 load_fbdev_backend(struct weston_compositor *c, char const * backend,
 		      int *argc, char **argv, struct weston_config *wc)
@@ -1258,13 +1303,15 @@ load_backend(struct weston_compositor *compositor, const char *backend,
 		return load_rdp_backend(compositor, backend, argc, argv, config);
 	else if (strstr(backend, "fbdev-backend.so"))
 		return load_fbdev_backend(compositor, backend, argc, argv, config);
-	else if (strstr(backend, "drm-backend.so"))
-		return load_drm_backend(compositor, backend, argc, argv, config);
 	else if (strstr(backend, "x11-backend.so"))
 		return load_x11_backend(compositor, backend, argc, argv, config);
+	else if (strstr(backend, "firerds-backend.so"))
+		return load_firerds_backend(compositor, backend, argc, argv, config);
+#if 0
+	else if (strstr(backend, "drm-backend.so"))
+		return load_drm_backend(compositor, backend, argc, argv, config);
 	else if (strstr(backend, "wayland-backend.so"))
 		return load_wayland_backend(compositor, backend, argc, argv, config);
-#if 0
 	else if (strstr(backend, "rpi-backend.so"))
 		return load_rpi_backend(compositor, backend, argc, argv, config);
 #endif

@@ -1,5 +1,6 @@
 /**
- * Copyright © 2015 Hardening <contact@hardening-consulting.com>
+ * Copyright © 2016 Thincast Technologies Gmbh
+ * Copyright © 2016 Hardening <contact@hardening-consulting.com>
  *
  * Permission to use, copy, modify, distribute, and sell this software and
  * its documentation for any purpose is hereby granted without fee, provided
@@ -47,8 +48,8 @@
 #include <winpr/collections.h>
 
 #include "../shared/helpers.h"
-#include "compositor.h"
 #include "pixman-renderer.h"
+#include "compositor-firerds.h"
 
 
 #define DEFAULT_AXIS_STEP_DISTANCE wl_fixed_from_int(10)
@@ -111,13 +112,6 @@ wl_os_accept_cloexec(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 }
 
 /* =========================================================================== */
-
-
-struct firerds_compositor_config {
-	int width;
-	int height;
-	char *firerds_named_pipe;
-};
 
 struct firerds_backend;
 struct firerds_output;
@@ -184,14 +178,6 @@ struct firerds_output {
 	pixman_region32_t damagedRegion;
 	bool outputActive;
 };
-
-
-static void
-firerds_compositor_config_init(struct firerds_compositor_config *config) {
-	config->width = 640;
-	config->height = 480;
-	config->firerds_named_pipe = 0;
-}
 
 static int
 firerds_send_stream(struct firerds_backend *c, wStream *s) {
@@ -279,7 +265,7 @@ firerds_refresh_region(struct firerds_backend *b, pixman_region32_t *region)
 	} else {
 		firerds_dmgbuf_set_num_rects(output->dmgBuf, nrects);
 		for (i = 0; i < nrects; i++, rect++, rdpRect++) {
-			//weston_log("refresh_rect(%d,%d,%d,%d)\n", rect->x1, rect->y1, rect->x2, rect->y2);
+			/*weston_log("refresh_rect id=0x%x (%d,%d,%d,%d)\n", output->pendingShmId, rect->x1, rect->y1, rect->x2, rect->y2);*/
 			firerds_update_framebuffer(b, rect);
 
 			rdpRect->x = rect->x1;
@@ -304,7 +290,7 @@ firerds_output_start_repaint_loop(struct weston_output *output)
 	struct timespec ts;
 
 	clock_gettime(output->compositor->presentation_clock, &ts);
-	weston_output_finish_frame(output, &ts, PRESENTATION_FEEDBACK_INVALID);
+	weston_output_finish_frame(output, &ts, WP_PRESENTATION_FEEDBACK_INVALID);
 }
 
 static int
@@ -323,7 +309,7 @@ firerds_output_repaint(struct weston_output *output_base, pixman_region32_t *dam
 
 	pixman_region32_subtract(&ec->primary_plane.damage, &ec->primary_plane.damage, damage);
 
-	wl_event_source_timer_update(output->finish_frame_timer, 16);
+	wl_event_source_timer_update(output->finish_frame_timer, 10);
 	return 0;
 }
 
@@ -593,15 +579,14 @@ firerds_destroy(struct weston_compositor *ec)
 
 static void
 firerds_mouse_event(struct firerds_backend *c, struct weston_seat *seat, DWORD x, DWORD y, DWORD flags) {
-	wl_fixed_t wl_x, wl_y;
 	uint32_t button = 0;
+	bool need_frame = false;
 
-	//weston_log("mouse event: x=%ld y=%ld flags=0x%x\n", x, y, flags);
+	/*weston_log("mouse event: x=%d y=%d flags=0x%x\n", x, y, flags);*/
 	if (flags & PTR_FLAGS_MOVE) {
 		if((int)x < c->output->base.width && (int)y < c->output->base.height) {
-			wl_x = wl_fixed_from_int((int)x);
-			wl_y = wl_fixed_from_int((int)y);
-			notify_motion_absolute(seat, weston_compositor_get_time(), wl_x, wl_y);
+			notify_motion_absolute(seat, weston_compositor_get_time(), x, y);
+			need_frame = true;
 		}
 	}
 
@@ -616,6 +601,7 @@ firerds_mouse_event(struct firerds_backend *c, struct weston_seat *seat, DWORD x
 		notify_button(seat, weston_compositor_get_time(), button,
 			(flags & PTR_FLAGS_DOWN) ? WL_POINTER_BUTTON_STATE_PRESSED : WL_POINTER_BUTTON_STATE_RELEASED
 		);
+		need_frame = true;
 	}
 
 	if (flags & PTR_FLAGS_WHEEL) {
@@ -633,12 +619,16 @@ firerds_mouse_event(struct firerds_backend *c, struct weston_seat *seat, DWORD x
 			value = -value;
 
 		event.axis = WL_POINTER_AXIS_VERTICAL_SCROLL;
-		event.value = wl_fixed_from_double(DEFAULT_AXIS_STEP_DISTANCE * value);
+		event.value = DEFAULT_AXIS_STEP_DISTANCE * value;
 		event.discrete = (int)value;
 		event.has_discrete = true;
 
 		notify_axis(seat, weston_compositor_get_time(), &event);
+		need_frame = true;
 	}
+
+	if (need_frame)
+		notify_pointer_frame(seat);
 }
 
 static void
@@ -649,7 +639,7 @@ firerds_scancode_keyboard_event(struct firerds_backend *c, struct weston_seat *s
 	enum wl_keyboard_key_state keyState;
 	int notify = 0;
 
-	//weston_log("code=%d flags=0x%x keyb=%d\n", code, flags, keyboardType);
+	/*weston_log("code=%d flags=0x%x keyb=%d\n", code, flags, keyboardType);*/
 	if (flags & KBD_FLAGS_DOWN) {
 		keyState = WL_KEYBOARD_KEY_STATE_PRESSED;
 		notify = 1;
@@ -1036,7 +1026,7 @@ firerds_treat_message(struct firerds_backend *b, UINT16 type, firerds_message *m
 	struct firerds_seat *firerdsSeat;
 	char seatName[50];
 
-	/*weston_log("message type %d\n", message->common.type);*/
+	/*weston_log("message type %d\n", type);*/
 	switch (type) {
 	case FIRERDS_CLIENT_CAPABILITIES:
 		capabilities = &message->capabilities;
@@ -1264,9 +1254,8 @@ firerds_named_pipe_activity(int fd, uint32_t mask, void *data) {
 
 
 static struct firerds_backend *
-firerds_compositor_create(struct weston_compositor *compositor,
-		struct firerds_compositor_config *config,
-		int *argc, char *argv[], struct weston_config *wconfig)
+firerds_backend_create(struct weston_compositor *compositor,
+		struct weston_firerds_backend_config *config)
 {
 	struct firerds_backend *b;
 	struct wl_event_loop *loop;
@@ -1295,10 +1284,7 @@ firerds_compositor_create(struct weston_compositor *compositor,
 	if (firerds_compositor_create_output(b, config->width, config->height) < 0)
 		goto err_seats;
 
-	if (!config->firerds_named_pipe) {
-		weston_log("no socket path given");
-		goto err_output;
-	}
+	compositor->capabilities |= WESTON_CAP_ARBITRARY_MODES;
 
 	b->listening_fd = wl_os_socket_cloexec(AF_UNIX, SOCK_STREAM, 0);
 	if (b->listening_fd < 0) {
@@ -1308,30 +1294,44 @@ firerds_compositor_create(struct weston_compositor *compositor,
 
 	memset(&remote, 0, sizeof(remote));
 	remote.sun_family = AF_UNIX;
-	strcpy(remote.sun_path, config->firerds_named_pipe);
+	strcpy(remote.sun_path, config->named_pipe);
 	len = strlen(remote.sun_path) + sizeof(remote.sun_family);
 	if (bind(b->listening_fd, (struct sockaddr *)&remote, len) < 0) {
 		weston_log("unable to bind the named pipe, error=%s path=%s\n",
-				strerror(errno), config->firerds_named_pipe);
+				strerror(errno), config->named_pipe);
 		goto err_socket;
 	}
 
 	if (!listen(b->listening_fd, 1) < 0) {
 		weston_log("unable to listen on the named pipe, errno=%d path=%s\n",
-				errno, config->firerds_named_pipe);
+				errno, config->named_pipe);
 		goto err_socket;
 	}
 
 	b->in_stream = Stream_New(NULL, FIRERDS_COMMON_LENGTH);
+	if (!b->in_stream) {
+		weston_log("unable to allocate input stream");
+		goto err_socket;
+	}
 	b->out_stream = Stream_New(NULL, 65536);
+	if (!b->out_stream) {
+		weston_log("unable to allocate input stream");
+		goto err_out_stream;
+	}
 	b->expected_bytes = FIRERDS_COMMON_LENGTH;
 	b->streamState = STREAM_WAITING_COMMON_HEADER;
 	loop = wl_display_get_event_loop(b->compositor->wl_display);
 	b->server_event_source = wl_event_loop_add_fd(loop, b->listening_fd, WL_EVENT_READABLE,
 													firerds_named_pipe_activity, b);
-
+	if (!b->server_event_source) {
+		weston_log("unable to add fd to event loop");
+		goto err_event_source;
+	}
 	return b;
-
+err_event_source:
+	Stream_Free(b->out_stream, TRUE);
+err_out_stream:
+	Stream_Free(b->in_stream, TRUE);
 err_socket:
 	close(b->listening_fd);
 err_output:
@@ -1344,23 +1344,38 @@ err_compositor:
 	return NULL;
 }
 
+static void
+config_init_to_defaults(struct weston_firerds_backend_config *config)
+{
+	config->width = 640;
+	config->height = 480;
+	config->named_pipe = NULL;
+}
+
 WL_EXPORT int
 backend_init(struct weston_compositor *compositor, int *argc, char *argv[],
 	     struct weston_config *wconfig,
 		 struct weston_backend_config *config_base)
 {
 	struct firerds_backend *b;
-	struct firerds_compositor_config config;
+	struct weston_firerds_backend_config config = {{ 0, }};
 
-	const struct weston_option firerds_options[] = {
-		{ WESTON_OPTION_STRING, "firerds-pipe", 0, &config.firerds_named_pipe },
-		{ WESTON_OPTION_UNSIGNED_INTEGER, "width", 0, &config.width },
-		{ WESTON_OPTION_UNSIGNED_INTEGER, "height", 0, &config.height },
-	};
 
-	firerds_compositor_config_init(&config);
+	if (config_base == NULL ||
+		config_base->struct_version != WESTON_FIRERDS_BACKEND_CONFIG_VERSION ||
+		config_base->struct_size > sizeof(struct weston_firerds_backend_config)) {
+		weston_log("fireRDS backend config structure is invalid\n");
+		return -1;
+	}
 
-	parse_options(firerds_options, ARRAY_LENGTH(firerds_options), argc, argv);
-	b = firerds_compositor_create(compositor, &config, argc, argv, wconfig);
+	config_init_to_defaults(&config);
+	memcpy(&config, config_base, config_base->struct_size);
+
+	if (!config.named_pipe) {
+		weston_log("missing named pipe to listen on");
+		return -1;
+	}
+
+	b = firerds_backend_create(compositor, &config);
 	return b ? 0 : -1;
 }

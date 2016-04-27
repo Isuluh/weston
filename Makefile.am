@@ -78,6 +78,7 @@ weston_SOURCES =					\
 	src/compositor-rdp.h				\
 	src/compositor-wayland.h			\
 	src/compositor-x11.h				\
+	src/compositor-firerds.h			\
 	src/input.c					\
 	src/data-device.c				\
 	src/screenshooter.c				\
@@ -220,6 +221,7 @@ westoninclude_HEADERS =				\
 	src/compositor-rdp.h			\
 	src/compositor-wayland.h		\
 	src/compositor-x11.h			\
+	src/compositor-firerds.h			\
 	src/timeline-object.h			\
 	shared/matrix.h				\
 	shared/config-parser.h			\
@@ -423,6 +425,7 @@ firerds_backend_la_CFLAGS =				\
 	$(AM_CFLAGS)
 firerds_backend_la_SOURCES = 			\
 	src/compositor-firerds.c			\
+	src/compositor-firerds.h			\
 	shared/helpers.h
 endif
 
