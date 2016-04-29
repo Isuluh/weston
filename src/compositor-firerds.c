@@ -1160,8 +1160,8 @@ firerds_treat_message(struct firerds_backend *b, UINT16 type, firerds_message *m
 		seat = &firerdsSeat->base;
 		weston_seat_release_keyboard(seat);
 		weston_seat_release_pointer(seat);
-		weston_seat_release(seat);
-		free(firerdsSeat);
+		/*weston_seat_release(seat);
+		free(firerdsSeat);*/
 		HashTable_Remove(b->extra_seats, (void *)(size_t)seatRemoved->connectionId);
 		break;
 
