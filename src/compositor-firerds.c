@@ -1018,6 +1018,7 @@ firerds_treat_message(struct firerds_backend *b, UINT16 type, firerds_message *m
 	firerds_msg_synchronize_keyboard_event *sync_keyboard_event;
 	firerds_msg_seat_new *seatNew;
 	firerds_msg_seat_removed *seatRemoved;
+	firerds_msg_message *userMessage;
 	firerds_msg_version version;
 
 	struct firerds_output *output;
@@ -1165,6 +1166,11 @@ firerds_treat_message(struct firerds_backend *b, UINT16 type, firerds_message *m
 		HashTable_Remove(b->extra_seats, (void *)(size_t)seatRemoved->connectionId);
 		break;
 
+	case FIRERDS_CLIENT_MESSAGE:
+		userMessage = &message->message;
+
+		break;
+
 	case FIRERDS_CLIENT_UNICODE_KEYBOARD_EVENT:
 	case FIRERDS_CLIENT_EXTENDED_MOUSE_EVENT:
 	default:
@@ -1302,7 +1308,7 @@ firerds_backend_create(struct weston_compositor *compositor,
 		goto err_socket;
 	}
 
-	if (!listen(b->listening_fd, 1) < 0) {
+	if (listen(b->listening_fd, 1) < 0) {
 		weston_log("unable to listen on the named pipe, errno=%d path=%s\n",
 				errno, config->named_pipe);
 		goto err_socket;
