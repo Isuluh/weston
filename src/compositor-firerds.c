@@ -140,11 +140,12 @@ struct firerds_backend {
 	struct weston_compositor *compositor;
 
 	struct firerds_output *output;
+	struct weston_plane not_rendered_plane;
 	struct firerds_seat *seat;
 	UINT32 mainSeatConnectionId;
 	wHashTable *extra_seats;
+	int n_seats;
 
-	bool have_seat;
 	int listening_fd;
 	struct wl_event_source *server_event_source;
 	int	client_fd;
@@ -331,8 +332,10 @@ firerds_kill_client(struct firerds_backend *c) {
 
 	c->expected_bytes = FIRERDS_COMMON_LENGTH;
 	c->streamState = STREAM_WAITING_COMMON_HEADER;
-	c->have_seat = false;
 	c->output->pendingShmId = -1;
+
+	HashTable_Clear(c->extra_seats);
+	c->n_seats = 0;
 }
 
 static void
@@ -440,6 +443,133 @@ firerds_switch_mode(struct weston_output *output, struct weston_mode *mode)
 	return 0;
 }
 
+static inline void
+set_rdp_pointer_andmask_bit(char *data, int x, int y, int width, int height, bool on)
+{
+	/**
+	 * MS-RDPBCGR 2.2.9.1.1.4.4:
+	 * andMaskData (variable): A variable-length array of bytes.
+	 * Contains the 1-bpp, bottom-up AND mask scan-line data.
+	 * The AND mask is padded to a 2-byte boundary for each encoded scan-line.
+	 */
+	int stride, offset;
+	char mvalue;
+
+	if (width < 0 || x < 0 || x >= width) {
+		return;
+	}
+
+	if (height < 0 || y < 0 || y >= height) {
+		return;
+	}
+
+	stride = ((width + 15) >> 4) * 2;
+	offset = stride * (height-1-y) + (x >> 3);
+	mvalue = 0x80 >> (x & 7);
+
+	if (on) {
+		data[offset] |= mvalue;
+	} else {
+		data[offset] &= ~mvalue;
+	}
+}
+
+static void
+computeMaskAndData(struct weston_surface *image, const uint32_t *src, uint32_t *data, char *mask) {
+	unsigned int p;
+	int32_t x, y;
+
+	for (y = 0; y < image->height; y++)	{
+		for (x = 0; x < image->width; x++) {
+			p = src[y * image->width + x];
+			if (p >> 24) {
+				set_rdp_pointer_andmask_bit(mask, x, y, image->width, image->height, false);
+
+				data[(image->height - y - 1) * image->width + x] = p;
+			}
+		}
+	}
+}
+
+static struct weston_plane *
+treat_main_seat_pointer(struct weston_compositor *ec, struct firerds_backend *b,
+		struct weston_view *ev, struct weston_surface *es, struct weston_pointer *main_pointer)
+{
+
+	/* don't support any kind of transformation */
+	if (ev->transform.enabled || ev->geometry.scissor_enabled)
+		return &ec->primary_plane;
+
+	if (es) {
+		firerds_msg_set_pointer msg;
+		struct wl_shm_buffer *shmbuf;
+		char data[96 * 96 * 4];
+		char mask[96 * 96 / 8];
+
+		if (!pixman_region32_not_empty(&es->damage))
+			return &b->not_rendered_plane;
+
+		if ((es->width > 96) || (es->height > 96)) /* pointer can't be bigger than 96 x 96 */
+			return &ec->primary_plane;
+
+		if (!ev->surface->buffer_ref.buffer)
+			return &ec->primary_plane;
+
+		shmbuf = wl_shm_buffer_get(ev->surface->buffer_ref.buffer->resource);
+		if (!shmbuf)
+			return &ec->primary_plane;;
+		if (wl_shm_buffer_get_format(shmbuf) != WL_SHM_FORMAT_ARGB8888)
+			return &ec->primary_plane;
+
+		memset(data, 0x00, 96 * 96 * 4);
+		memset(mask, 0xff, 96 * 96 / 8);
+
+		msg.xPos = main_pointer->hotspot_x;
+		msg.yPos = main_pointer->hotspot_y;
+		msg.width = es->width;
+		msg.height = es->height;
+		msg.xorBpp = 32;
+		msg.andMaskData = (BYTE *)mask;
+		msg.lengthAndMask = ((es->width + 15) >> 4) * 2 * es->height;
+		msg.xorMaskData = (BYTE *)data;
+		msg.lengthXorMask = 4 * es->width * es->height;
+		msg.connectionId = b->mainSeatConnectionId;
+
+		computeMaskAndData(es, (uint32_t *)wl_shm_buffer_get_data(shmbuf), (uint32_t *)data, mask);
+
+		backend_send_message(b, FIRERDS_SERVER_SET_POINTER, (firerds_message *)&msg);
+
+		return &b->not_rendered_plane;
+	}
+
+	return &ec->primary_plane;
+}
+
+static void
+firerds_assign_planes(struct weston_output *output_base)
+{
+	struct weston_compositor *ec = output_base->compositor;
+	struct firerds_backend *b = (struct firerds_backend *)ec->backend;
+	struct weston_view *ev, *next;
+	struct weston_pointer *main_pointer = NULL;
+
+	if (b && b->seat)
+		main_pointer = b->seat->base.pointer_state;
+
+	wl_list_for_each_safe(ev, next, &output_base->compositor->view_list, link) {
+		struct weston_surface *es = ev->surface;
+		struct weston_plane *target_plane;
+
+		target_plane = &ec->primary_plane;
+		if ((b->n_seats == 1) && main_pointer && (main_pointer->sprite == ev))
+			target_plane = treat_main_seat_pointer(ec, b, ev, es, main_pointer);
+
+		weston_view_move_to_plane(ev, target_plane);
+		ev->psf_flags = 0;
+	}
+
+}
+
 struct firerds_simple_mode {
 	int width;
 	int height;
@@ -507,6 +637,7 @@ firerds_compositor_create_output(struct firerds_backend *c, int width, int heigh
 	fb_infos->bytesPerPixel = 4;
 	fb_infos->userId = (UINT32)getuid();
 	fb_infos->scanline = width * 4;
+	fb_infos->multiseatCapable = TRUE;
 
 	system_pointer = &c->rds_set_system_pointer;
 	system_pointer->ptrType = SYSPTR_NULL;
@@ -530,7 +661,7 @@ firerds_compositor_create_output(struct firerds_backend *c, int width, int heigh
 	output->base.start_repaint_loop = firerds_output_start_repaint_loop;
 	output->base.repaint = firerds_output_repaint;
 	output->base.destroy = firerds_output_destroy;
-	output->base.assign_planes = NULL;
+	output->base.assign_planes = firerds_assign_planes;
 	output->base.set_backlight = NULL;
 	output->base.set_dpms = NULL;
 	output->base.switch_mode = firerds_switch_mode;
@@ -883,7 +1014,8 @@ firerds_update_keyboard_modifiers(struct firerds_backend *c, struct weston_seat 
 }
 
 static int
-firerds_send_disable_pointer(struct firerds_backend *b) {
+firerds_send_disable_pointer(struct firerds_backend *b, UINT32 connId) {
+	b->rds_set_system_pointer.connectionId = connId;
 	return backend_send_message(b, FIRERDS_SERVER_SET_SYSTEM_POINTER, (firerds_message *)&b->rds_set_system_pointer);
 }
 
@@ -1043,6 +1175,7 @@ firerds_treat_message(struct firerds_backend *b, UINT16 type, firerds_message *m
 		weston_seat_init(&firerdsSeat->base, b->compositor, "firerds");
 		weston_seat_init_pointer(&firerdsSeat->base);
 		b->mainSeatConnectionId = capabilities->connectionId;
+		weston_log("connection from front connection %d\n", b->mainSeatConnectionId);
 
 		firerds_configure_keyboard(b, firerdsSeat, capabilities->KeyboardLayout, capabilities->KeyboardType);
 #ifdef BUILD_MULTITOUCH
@@ -1060,7 +1193,7 @@ firerds_treat_message(struct firerds_backend *b, UINT16 type, firerds_message *m
 				weston_log("unable to send shared framebuffer, errno=%d\n", errno);
 		}
 
-		if (firerds_send_disable_pointer(b) < 0)
+		if (firerds_send_disable_pointer(b, b->mainSeatConnectionId) < 0)
 			weston_log("unable to disable client-side pointer, errno=%d\n", errno);
 
 		output = b->output;
@@ -1068,6 +1201,7 @@ firerds_treat_message(struct firerds_backend *b, UINT16 type, firerds_message *m
 										0, 0, capabilities->DesktopWidth, capabilities->DesktopHeight)) {
 			weston_log("unable to mark the full screen as damaged");
 		}
+		b->n_seats++;
 		break;
 
 	case FIRERDS_CLIENT_VERSION:
@@ -1079,7 +1213,6 @@ firerds_treat_message(struct firerds_backend *b, UINT16 type, firerds_message *m
 			weston_log("unable to answer with client version");
 		}
 		break;
-
 
 	case FIRERDS_CLIENT_MOUSE_EVENT:
 		mouse_event = &message->mouse;
@@ -1147,7 +1280,22 @@ firerds_treat_message(struct firerds_backend *b, UINT16 type, firerds_message *m
 		weston_seat_init(seat, b->compositor, seatName);
 		weston_seat_init_pointer(seat);
 		firerds_configure_keyboard(b, firerdsSeat, seatNew->keyboardLayout, seatNew->keyboardType);
+
+		if (b->n_seats == 1) {
+			/* start of shadowing, we must switch the main seat to use no client-side
+			 * pointer
+			 */
+			if (firerds_send_disable_pointer(b, b->mainSeatConnectionId) < 0)
+				weston_log("unable to disable client-side pointer on main connection, errno=%d\n", errno);
+		}
+
+		if (firerds_send_disable_pointer(b, seatNew->connectionId) < 0)
+			weston_log("unable to disable client-side pointer on spy connection, errno=%d\n", errno);
+
+		b->n_seats++;
+
 		HashTable_Add(b->extra_seats, (void *)(size_t)seatNew->connectionId, seat);
+
 		break;
 
 	case FIRERDS_CLIENT_SEAT_REMOVED:
@@ -1164,6 +1312,19 @@ firerds_treat_message(struct firerds_backend *b, UINT16 type, firerds_message *m
 		/*weston_seat_release(seat);
 		free(firerdsSeat);*/
 		HashTable_Remove(b->extra_seats, (void *)(size_t)seatRemoved->connectionId);
+		b->n_seats--;
+
+		if (b->n_seats == 1) {
+			/* end of shadowing, damage the pointer surface so that it is set again
+			 * on the client
+			 */
+			struct weston_pointer *pointer = b->seat->base.pointer_state;
+			if (pointer && pointer->sprite && pointer->sprite->surface) {
+				struct weston_surface *pointer_surface = pointer->sprite->surface;
+				pixman_region32_union_rect(&pointer_surface->damage, &pointer_surface->damage,
+						0, 0, pointer_surface->width, pointer_surface->height);
+			}
+		}
 		break;
 
 	case FIRERDS_CLIENT_MESSAGE:
@@ -1281,7 +1442,7 @@ firerds_backend_create(struct weston_compositor *compositor,
 	if (!b->extra_seats)
 		goto err_compositor;
 
-	if (weston_compositor_set_presentation_clock_software(b->compositor) < 0)
+	if (weston_compositor_set_presentation_clock_software(compositor) < 0)
 		goto err_seats;
 
 	if (pixman_renderer_init(b->compositor) < 0)
@@ -1289,6 +1450,8 @@ firerds_backend_create(struct weston_compositor *compositor,
 
 	if (firerds_compositor_create_output(b, config->width, config->height) < 0)
 		goto err_seats;
+
+	weston_plane_init(&b->not_rendered_plane, compositor, 0, 0);
 
 	compositor->capabilities |= WESTON_CAP_ARBITRARY_MODES;
 
@@ -1333,6 +1496,8 @@ firerds_backend_create(struct weston_compositor *compositor,
 		weston_log("unable to add fd to event loop");
 		goto err_event_source;
 	}
+
+	compositor->backend = &b->base;
 	return b;
 err_event_source:
 	Stream_Free(b->out_stream, TRUE);
