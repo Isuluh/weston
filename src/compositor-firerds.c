@@ -31,6 +31,7 @@
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <linux/input.h>
 
 #include <firerds/backend.h>
@@ -1142,6 +1143,171 @@ firerds_configure_multitouch(struct firerds_backend *c, struct firerds_seat *sea
 #endif
 
 static int
+write_pipe_rds_client_message(int fd, BYTE* value, int size) {
+	int written;
+	int totalWritten = 0;
+
+	while (totalWritten != size) {
+		written = write(fd, value + totalWritten, size - totalWritten);
+		if (written < 0) {
+			weston_log("%s: socket(%d) for message display closed unexpected\n", __FUNCTION__, fd);
+			close(fd);
+			return -1;
+		}
+		totalWritten += written;
+	}
+	return written;
+}
+
+static int
+read_pipe_rds_client_message(int fd, BYTE* buffer, int size)
+{
+	int currentRead;
+	int totalBytes = 0;
+	while (totalBytes != size) {
+		currentRead = read(fd, buffer + totalBytes, size - totalBytes);
+		if (currentRead < 1) {
+			weston_log("%s: socket(%d) for message display closed unexpected\n", __FUNCTION__, fd);
+			close(fd);
+			return 0;
+		}
+		totalBytes += currentRead;
+	}
+	return 1;
+}
+
+
+struct firerds_message_process {
+	struct wl_event_source *event_source;
+	struct firerds_backend *backend;
+};
+
+static int
+firerds_message_process_activity(int fd, uint32_t mask, void *data) {
+	struct firerds_message_process *process = (struct firerds_message_process *)data;
+	int result, retValue;
+	UINT32 message_id;
+	firerds_msg_message_reply rep;
+
+	retValue = -1;
+	if (!read_pipe_rds_client_message(fd, (BYTE *)&result, sizeof(result)))
+		goto out;
+	if (!read_pipe_rds_client_message(fd, (BYTE *)&message_id, sizeof(message_id)))
+		goto out;
+
+	close(fd);
+
+	weston_log("%s: sending message with messageid (%d) and result(%d)\n", __FUNCTION__, message_id, result);
+
+	rep.message_id = message_id;
+	rep.result = (UINT32)result;
+
+	if (backend_send_message(process->backend, FIRERDS_SERVER_MESSAGE_REPLY, (firerds_message*) &rep) < 0) {
+		weston_log("error sending user message reply");
+	} else {
+		retValue = 0;
+	}
+
+out:
+	wl_event_source_remove(process->event_source);
+	free(process);
+	return retValue;
+}
+
+#define BUFFER_SIZE_MESSAGE 4 * 1024
+
+static int
+firerds_show_user_message(firerds_msg_message *msg) {
+	int retVal = 0;
+	char buffer[BUFFER_SIZE_MESSAGE];
+	char executableName[BUFFER_SIZE_MESSAGE];
+
+	snprintf(executableName, BUFFER_SIZE_MESSAGE, "firerds-message");
+
+	snprintf(buffer, BUFFER_SIZE_MESSAGE, "%s -platform wayland %u %u %u %u \"%s\" \"%s\" \"%s\" \"%s\" \"%s\"",
+					executableName,
+					msg->message_id, msg->message_type, msg->style, msg->timeout,
+					msg->parameter_num > 0 ? msg->parameter1 : "",
+					msg->parameter_num > 1 ? msg->parameter2 : "",
+					msg->parameter_num > 2 ? msg->parameter3 : "",
+					msg->parameter_num > 3 ? msg->parameter4 : "",
+					msg->parameter_num > 4 ? msg->parameter5 : ""
+					);
+	retVal = system(buffer);
+	if (!WIFEXITED(retVal)) {
+		return -1;
+	}
+
+	retVal = WEXITSTATUS(retVal);
+	if (retVal == 255) {
+		retVal = -1;
+	}
+	return retVal;
+}
+
+static BOOL
+firerds_treat_user_message(struct firerds_backend *b, firerds_msg_message *msg) {
+	pid_t pid;
+	int status;
+	int retVal = 0;
+	int fd[2];
+	struct firerds_message_process *process;
+
+	process = (struct firerds_message_process *)malloc(sizeof(*process));
+	if (!process) {
+		weston_log("unable to allocate process tracking info\n");
+		return FALSE;
+	}
+
+	process->backend = b;
+
+	status = pipe(fd);
+	if (status != 0) {
+		weston_log("%s: pipe creation failed\n", __FUNCTION__);
+		free(process);
+		return FALSE;
+	}
+
+	process->event_source = wl_event_loop_add_fd(wl_display_get_event_loop(b->compositor->wl_display),
+			fd[0], WL_EVENT_READABLE, firerds_message_process_activity, process);
+	if (!process->event_source) {
+		weston_log("%s: unable to create event source\n", __FUNCTION__);
+		close(fd[0]);
+		close(fd[1]);
+		free(process);
+		return FALSE;
+	}
+
+	pid = fork();
+	if (pid == 0) {
+		/* child */
+		if (fork() == 0) {
+			/* Child process closes up input side of pipe */
+			close(fd[0]);
+
+			retVal = firerds_show_user_message(msg);
+
+			write_pipe_rds_client_message(fd[1], (BYTE *)&retVal, sizeof(retVal));
+			write_pipe_rds_client_message(fd[1], (BYTE *)&msg->message_id, sizeof(msg->message_id));
+
+			close(fd[1]);
+			exit(0);
+		} else {
+			exit(0);
+		}
+	} else {
+		/* parent */
+		waitpid(pid, &status, 0);
+
+		/* Parent process closes up output side of pipe */
+		close(fd[1]);
+	}
+
+	return TRUE;
+}
+
+
+static int
 firerds_treat_message(struct firerds_backend *b, UINT16 type, firerds_message *message) {
 	firerds_msg_capabilities *capabilities;
 	firerds_msg_mouse_event *mouse_event;
@@ -1150,7 +1316,6 @@ firerds_treat_message(struct firerds_backend *b, UINT16 type, firerds_message *m
 	firerds_msg_synchronize_keyboard_event *sync_keyboard_event;
 	firerds_msg_seat_new *seatNew;
 	firerds_msg_seat_removed *seatRemoved;
-	firerds_msg_message *userMessage;
 	firerds_msg_version version;
 
 	struct firerds_output *output;
@@ -1328,8 +1493,7 @@ firerds_treat_message(struct firerds_backend *b, UINT16 type, firerds_message *m
 		break;
 
 	case FIRERDS_CLIENT_MESSAGE:
-		userMessage = &message->message;
-
+		firerds_treat_user_message(b, &message->message);
 		break;
 
 	case FIRERDS_CLIENT_UNICODE_KEYBOARD_EVENT:
